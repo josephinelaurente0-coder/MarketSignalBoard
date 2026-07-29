@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { ComposedChart, Bar, Line, YAxis, ResponsiveContainer } from "recharts";
 
 // ---------- design tokens ----------
 const T = {
@@ -23,12 +22,12 @@ const T = {
 
 // ---------- instrument config ----------
 const ASSETS = [
-  { id: "XAU", label: "Gold", pair: "XAU / USD", kind: "commodity", src: "gold-api", symbol: "XAU", quote: "USD", freshness: "live", candleBucketMs: 5 * 60 * 1000 },
-  { id: "BTC", label: "Bitcoin", pair: "BTC / USD", kind: "crypto", src: "gold-api", symbol: "BTC", quote: "USD", freshness: "live", candleBucketMs: 5 * 60 * 1000 },
-  { id: "EURUSD", label: "Euro", pair: "EUR / USD", kind: "forex", src: "frankfurter", base: "EUR", quote: "USD", freshness: "daily ref", candleBucketMs: 24 * 60 * 60 * 1000 },
-  { id: "GBPUSD", label: "British Pound", pair: "GBP / USD", kind: "forex", src: "frankfurter", base: "GBP", quote: "USD", freshness: "daily ref", candleBucketMs: 24 * 60 * 60 * 1000 },
-  { id: "USDJPY", label: "Japanese Yen", pair: "USD / JPY", kind: "forex", src: "frankfurter", base: "USD", quote: "JPY", freshness: "daily ref", candleBucketMs: 24 * 60 * 60 * 1000 },
-  { id: "USDCHF", label: "Swiss Franc", pair: "USD / CHF", kind: "forex", src: "frankfurter", base: "USD", quote: "CHF", freshness: "daily ref", candleBucketMs: 24 * 60 * 60 * 1000 },
+  { id: "XAU", label: "Gold", pair: "XAU / USD", kind: "commodity", src: "gold-api", symbol: "XAU", quote: "USD", freshness: "live", tvSymbol: "OANDA:XAUUSD" },
+  { id: "BTC", label: "Bitcoin", pair: "BTC / USD", kind: "crypto", src: "gold-api", symbol: "BTC", quote: "USD", freshness: "live", tvSymbol: "COINBASE:BTCUSD" },
+  { id: "EURUSD", label: "Euro", pair: "EUR / USD", kind: "forex", src: "frankfurter", base: "EUR", quote: "USD", freshness: "daily ref", tvSymbol: "OANDA:EURUSD" },
+  { id: "GBPUSD", label: "British Pound", pair: "GBP / USD", kind: "forex", src: "frankfurter", base: "GBP", quote: "USD", freshness: "daily ref", tvSymbol: "OANDA:GBPUSD" },
+  { id: "USDJPY", label: "Japanese Yen", pair: "USD / JPY", kind: "forex", src: "frankfurter", base: "USD", quote: "JPY", freshness: "daily ref", tvSymbol: "OANDA:USDJPY" },
+  { id: "USDCHF", label: "Swiss Franc", pair: "USD / CHF", kind: "forex", src: "frankfurter", base: "USD", quote: "CHF", freshness: "daily ref", tvSymbol: "OANDA:USDCHF" },
 ];
 
 const SMA_FAST = 5;
@@ -37,10 +36,6 @@ const RSI_PERIOD = 14;
 const MAX_HISTORY = 300;
 const POLL_MS = 60000;
 const STORAGE_KEY = "price-history";
-const BB_PERIOD = 20;
-const BB_INNER_MULT = 1;
-const BB_OUTER_MULT = 2;
-const CHART_WINDOW = 60;
 
 // ---------- indicator math ----------
 function sma(prices, period) {
@@ -61,50 +56,6 @@ function rsi(prices, period = RSI_PERIOD) {
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
-}
-
-// group raw ticks into OHLC candles so the chart can render red/green candlesticks
-function buildCandles(history, bucketMs) {
-  if (!history.length) return [];
-  const buckets = new Map();
-  history.forEach((h) => {
-    const key = Math.floor(h.t / bucketMs) * bucketMs;
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(h.price);
-  });
-  return Array.from(buckets.keys())
-    .sort((a, b) => a - b)
-    .map((key) => {
-      const prices = buckets.get(key);
-      return {
-        time: key,
-        open: prices[0],
-        high: Math.max(...prices),
-        low: Math.min(...prices),
-        close: prices[prices.length - 1],
-      };
-    });
-}
-
-// double Bollinger Bands: one inner band (BB_INNER_MULT std) and one outer band (BB_OUTER_MULT std),
-// both built off the same rolling mean
-function computeBollingerSeries(prices, period = BB_PERIOD) {
-  return prices.map((price, i) => {
-    if (i < period - 1) return { i, price };
-    const window = prices.slice(i - period + 1, i + 1);
-    const mean = window.reduce((a, b) => a + b, 0) / period;
-    const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / period;
-    const std = Math.sqrt(variance);
-    return {
-      i,
-      price,
-      mid: mean,
-      upperInner: mean + BB_INNER_MULT * std,
-      lowerInner: mean - BB_INNER_MULT * std,
-      upperOuter: mean + BB_OUTER_MULT * std,
-      lowerOuter: mean - BB_OUTER_MULT * std,
-    };
-  });
 }
 
 function computeSignal(prices) {
@@ -181,29 +132,50 @@ function Badge({ signal }) {
 }
 
 // ---------- instrument card ----------
-// custom shape for recharts <Bar> to draw a red/green candlestick body + wick
-function CandleStick(props) {
-  const { x, y, width, height, payload } = props;
-  const { open, close, high, low } = payload;
-  if ([open, close, high, low].some((v) => v == null)) return null;
-  const isUp = close >= open;
-  const color = isUp ? T.buy : T.sell;
-  const range = high - low || 1;
-  const priceToY = (price) => y + height * (1 - (price - low) / range);
-  const openY = priceToY(open);
-  const closeY = priceToY(close);
-  const bodyTop = Math.min(openY, closeY);
-  const bodyHeight = Math.max(Math.abs(closeY - openY), 1);
-  const bodyWidth = Math.max(width * 0.6, 2);
-  const bodyX = x + (width - bodyWidth) / 2;
-  const wickX = x + width / 2;
+// embeds TradingView's free Advanced Real-Time Chart widget: real live candles,
+// 15-minute interval, with a 1-std and 2-std Bollinger Band study layered on top
+function TradingViewChart({ symbol }) {
+  const container = useRef(null);
 
-  return (
-    <g>
-      <line x1={wickX} x2={wickX} y1={y} y2={y + height} stroke={color} strokeWidth={1} />
-      <rect x={bodyX} y={bodyTop} width={bodyWidth} height={bodyHeight} fill={color} />
-    </g>
-  );
+  useEffect(() => {
+    if (!container.current) return;
+    container.current.innerHTML = "";
+
+    const widgetDiv = document.createElement("div");
+    widgetDiv.className = "tradingview-widget-container__widget";
+    widgetDiv.style.height = "100%";
+    widgetDiv.style.width = "100%";
+    container.current.appendChild(widgetDiv);
+
+    const script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    script.async = true;
+    script.innerHTML = JSON.stringify({
+      autosize: true,
+      symbol,
+      interval: "15",
+      timezone: "Etc/UTC",
+      theme: "dark",
+      style: "1",
+      locale: "en",
+      backgroundColor: "rgba(22,29,44,1)",
+      gridColor: "rgba(42,51,72,0.6)",
+      hide_top_toolbar: false,
+      hide_legend: false,
+      withdateranges: false,
+      allow_symbol_change: false,
+      hide_side_toolbar: true,
+      studies: [
+        { id: "BB@tv-basicstudies", inputs: { length: 20, stdDev: 1 } },
+        { id: "BB@tv-basicstudies", inputs: { length: 20, stdDev: 2 } },
+      ],
+      support_host: "https://www.tradingview.com",
+    });
+    container.current.appendChild(script);
+  }, [symbol]);
+
+  return <div className="tradingview-widget-container" ref={container} style={{ height: "100%", width: "100%" }} />;
 }
 
 function AssetCard({ asset, history, latest, prevLatest, error }) {
@@ -211,14 +183,6 @@ function AssetCard({ asset, history, latest, prevLatest, error }) {
   const signal = computeSignal(prices);
   const change = latest != null && prevLatest != null ? latest - prevLatest : null;
   const changePct = change != null && prevLatest ? (change / prevLatest) * 100 : null;
-
-  const candles = buildCandles(history, asset.candleBucketMs);
-  const candleCloses = candles.map((c) => c.close);
-
-  const bbOnCloses = computeBollingerSeries(candleCloses);
-  const chartData = candles.map((c, i) => ({ ...c, ...bbOnCloses[i] })).slice(-CHART_WINDOW);
-  const hasBands = candles.length >= BB_PERIOD;
-  const pointsUntilBands = BB_PERIOD - candles.length;
 
   return (
     <div
@@ -258,29 +222,8 @@ function AssetCard({ asset, history, latest, prevLatest, error }) {
             )}
           </div>
 
-          <div style={{ height: 170 }}>
-            {chartData.length > 1 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={chartData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
-                  <YAxis hide domain={["auto", "auto"]} />
-                  <Line type="monotone" dataKey="upperOuter" stroke={T.brassDim} strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} connectNulls />
-                  <Line type="monotone" dataKey="upperInner" stroke={T.hold} strokeWidth={1} dot={false} isAnimationActive={false} connectNulls />
-                  <Line type="monotone" dataKey="mid" stroke={T.textMuted} strokeWidth={1} strokeDasharray="2 3" dot={false} isAnimationActive={false} connectNulls />
-                  <Line type="monotone" dataKey="lowerInner" stroke={T.hold} strokeWidth={1} dot={false} isAnimationActive={false} connectNulls />
-                  <Line type="monotone" dataKey="lowerOuter" stroke={T.brassDim} strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} connectNulls />
-                  <Bar dataKey={(d) => [d.low, d.high]} shape={CandleStick} isAnimationActive={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            ) : (
-              <div style={{ fontFamily: T.sans, fontSize: 11, color: T.textMuted, paddingTop: 70, textAlign: "center" }}>
-                Gathering ticks to form the first candle…
-              </div>
-            )}
-            {!hasBands && chartData.length > 1 && (
-              <div style={{ fontFamily: T.sans, fontSize: 10, color: T.textMuted, marginTop: -6, textAlign: "right" }}>
-                Bollinger bands need {pointsUntilBands} more candle{pointsUntilBands === 1 ? "" : "s"}
-              </div>
-            )}
+          <div style={{ height: 280, borderRadius: 6, overflow: "hidden" }}>
+            <TradingViewChart symbol={asset.tvSymbol} />
           </div>
 
           <Badge signal={signal} />
@@ -442,7 +385,7 @@ export default function MarketSignalBoard() {
         @media (min-width: 640px) {
           .grid-cards { grid-template-columns: 1fr 1fr; }
         }
-        @media (min-width: 1000px) {
+        @media (min-width: 1300px) {
           .grid-cards { grid-template-columns: 1fr 1fr 1fr; }
         }
         button:focus-visible {
@@ -451,7 +394,7 @@ export default function MarketSignalBoard() {
         }
       `}</style>
 
-      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 20px 60px" }}>
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "28px 20px 60px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 18 }}>
           <div>
             <div style={{ fontFamily: T.serif, fontSize: 26, letterSpacing: "0.01em" }}>Market Signal Board</div>
@@ -488,7 +431,7 @@ export default function MarketSignalBoard() {
 
       <Ticker items={tickerItems} />
 
-      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "22px 20px 0" }}>
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "22px 20px 0" }}>
         <div className="grid-cards">
           {ASSETS.map((asset) => {
             const arr = history[asset.id] || [];
@@ -509,8 +452,9 @@ export default function MarketSignalBoard() {
 
         <div style={{ marginTop: 26, borderTop: `1px solid ${T.border}`, paddingTop: 16, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div style={{ fontFamily: T.sans, fontSize: 11, color: T.textMuted, maxWidth: 640, lineHeight: 1.5 }}>
-            Signals combine a {SMA_FAST}/{SMA_SLOW}-tick moving average crossover with 14-tick RSI, built from prices this board has collected itself —
-            they get more reliable the longer this stays open. Forex majors use daily reference rates; gold and Bitcoin refresh live.
+            Charts are live TradingView feeds (15-minute candles) with 1-std and 2-std Bollinger Bands built in.
+            Buy/sell alerts below each chart come from a {SMA_FAST}/{SMA_SLOW}-tick moving average crossover plus 14-tick RSI,
+            built from prices this board polls itself — those get more reliable the longer it stays open.
             This is not financial advice, and nothing here places trades on your behalf.
           </div>
           <button
