@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { LineChart, Line, ResponsiveContainer } from "recharts";
+import { LineChart, Line, YAxis, ResponsiveContainer } from "recharts";
 
 // ---------- design tokens ----------
 const T = {
@@ -23,8 +23,8 @@ const T = {
 
 // ---------- instrument config ----------
 const ASSETS = [
-  { id: "XAU", label: "Gold", pair: "XAU / USD", kind: "commodity", src: "gold-api", symbol: "XAU", freshness: "live" },
-  { id: "BTC", label: "Bitcoin", pair: "BTC / USD", kind: "crypto", src: "gold-api", symbol: "BTC", freshness: "live" },
+  { id: "XAU", label: "Gold", pair: "XAU / USD", kind: "commodity", src: "gold-api", symbol: "XAU", quote: "USD", freshness: "live" },
+  { id: "BTC", label: "Bitcoin", pair: "BTC / USD", kind: "crypto", src: "gold-api", symbol: "BTC", quote: "USD", freshness: "live" },
   { id: "EURUSD", label: "Euro", pair: "EUR / USD", kind: "forex", src: "frankfurter", base: "EUR", quote: "USD", freshness: "daily ref" },
   { id: "GBPUSD", label: "British Pound", pair: "GBP / USD", kind: "forex", src: "frankfurter", base: "GBP", quote: "USD", freshness: "daily ref" },
   { id: "USDJPY", label: "Japanese Yen", pair: "USD / JPY", kind: "forex", src: "frankfurter", base: "USD", quote: "JPY", freshness: "daily ref" },
@@ -37,6 +37,10 @@ const RSI_PERIOD = 14;
 const MAX_HISTORY = 300;
 const POLL_MS = 60000;
 const STORAGE_KEY = "price-history";
+const BB_PERIOD = 20;
+const BB_INNER_MULT = 1;
+const BB_OUTER_MULT = 2;
+const CHART_WINDOW = 60;
 
 // ---------- indicator math ----------
 function sma(prices, period) {
@@ -57,6 +61,27 @@ function rsi(prices, period = RSI_PERIOD) {
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
+}
+
+// double Bollinger Bands: one inner band (BB_INNER_MULT std) and one outer band (BB_OUTER_MULT std),
+// both built off the same rolling mean
+function computeBollingerSeries(prices, period = BB_PERIOD) {
+  return prices.map((price, i) => {
+    if (i < period - 1) return { i, price };
+    const window = prices.slice(i - period + 1, i + 1);
+    const mean = window.reduce((a, b) => a + b, 0) / period;
+    const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / period;
+    const std = Math.sqrt(variance);
+    return {
+      i,
+      price,
+      mid: mean,
+      upperInner: mean + BB_INNER_MULT * std,
+      lowerInner: mean - BB_INNER_MULT * std,
+      upperOuter: mean + BB_OUTER_MULT * std,
+      lowerOuter: mean - BB_OUTER_MULT * std,
+    };
+  });
 }
 
 function computeSignal(prices) {
@@ -138,7 +163,11 @@ function AssetCard({ asset, history, latest, prevLatest, error }) {
   const signal = computeSignal(prices);
   const change = latest != null && prevLatest != null ? latest - prevLatest : null;
   const changePct = change != null && prevLatest ? (change / prevLatest) * 100 : null;
-  const chartData = history.slice(-40).map((h, i) => ({ i, price: h.price }));
+
+  const bbSeries = computeBollingerSeries(prices);
+  const chartData = bbSeries.slice(-CHART_WINDOW);
+  const hasBands = prices.length >= BB_PERIOD;
+  const pointsUntilBands = BB_PERIOD - prices.length;
 
   return (
     <div
@@ -167,26 +196,37 @@ function AssetCard({ asset, history, latest, prevLatest, error }) {
         <div style={{ fontFamily: T.sans, fontSize: 12, color: T.sell }}>Couldn't fetch this price. Will retry next cycle.</div>
       ) : (
         <>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 10 }}>
-            <div style={{ fontFamily: T.mono, fontSize: 28, color: T.textPrimary, lineHeight: 1 }}>
-              {formatPrice(asset.id, latest)}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <div style={{ fontFamily: T.mono, fontSize: 15, color: T.textPrimary }}>
+              {formatPrice(asset.id, latest)} <span style={{ fontSize: 10, color: T.textMuted }}>{asset.quote}</span>
             </div>
             {changePct != null && (
-              <div style={{ fontFamily: T.mono, fontSize: 13, color: change >= 0 ? T.buy : T.sell, paddingBottom: 3 }}>
+              <div style={{ fontFamily: T.mono, fontSize: 12, color: change >= 0 ? T.buy : T.sell }}>
                 {change >= 0 ? "▲" : "▼"} {Math.abs(changePct).toFixed(3)}%
               </div>
             )}
           </div>
 
-          <div style={{ height: 44 }}>
+          <div style={{ height: 150 }}>
             {chartData.length > 1 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <Line type="monotone" dataKey="price" stroke={T.brass} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <LineChart data={chartData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
+                  <YAxis hide domain={["auto", "auto"]} />
+                  <Line type="monotone" dataKey="upperOuter" stroke={T.brassDim} strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} connectNulls />
+                  <Line type="monotone" dataKey="upperInner" stroke={T.hold} strokeWidth={1} dot={false} isAnimationActive={false} connectNulls />
+                  <Line type="monotone" dataKey="mid" stroke={T.textMuted} strokeWidth={1} strokeDasharray="2 3" dot={false} isAnimationActive={false} connectNulls />
+                  <Line type="monotone" dataKey="lowerInner" stroke={T.hold} strokeWidth={1} dot={false} isAnimationActive={false} connectNulls />
+                  <Line type="monotone" dataKey="lowerOuter" stroke={T.brassDim} strokeWidth={1} strokeDasharray="3 3" dot={false} isAnimationActive={false} connectNulls />
+                  <Line type="monotone" dataKey="price" stroke={T.brass} strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <div style={{ fontFamily: T.sans, fontSize: 11, color: T.textMuted, paddingTop: 14 }}>Gathering ticks for chart…</div>
+              <div style={{ fontFamily: T.sans, fontSize: 11, color: T.textMuted, paddingTop: 60, textAlign: "center" }}>Gathering ticks for chart…</div>
+            )}
+            {!hasBands && chartData.length > 1 && (
+              <div style={{ fontFamily: T.sans, fontSize: 10, color: T.textMuted, marginTop: -6, textAlign: "right" }}>
+                Bollinger bands need {pointsUntilBands} more reading{pointsUntilBands === 1 ? "" : "s"}
+              </div>
             )}
           </div>
 
@@ -270,12 +310,12 @@ export default function MarketSignalBoard() {
         arr.push({ t: now, price: r.price });
         if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
         nextHistory[r.id] = arr;
-        tickerItems.push({ label: asset.pair, val: formatPrice(r.id, r.price) });
+        tickerItems.push({ label: asset.pair, val: `${formatPrice(r.id, r.price)} ${asset.quote}` });
       } else {
         nextErrors[r.id] = true;
         const prevArr = nextHistory[r.id];
         const lastVal = prevArr && prevArr.length ? prevArr[prevArr.length - 1].price : null;
-        tickerItems.push({ label: asset.pair, val: lastVal != null ? formatPrice(r.id, lastVal) + " (stale)" : "—" });
+        tickerItems.push({ label: asset.pair, val: lastVal != null ? `${formatPrice(r.id, lastVal)} ${asset.quote} (stale)` : "—" });
       }
     });
 
@@ -327,7 +367,7 @@ export default function MarketSignalBoard() {
   const tickerItems = ASSETS.map((a) => {
     const arr = history[a.id];
     const last = arr && arr.length ? arr[arr.length - 1].price : null;
-    return { label: a.pair, val: last != null ? formatPrice(a.id, last) : "…" };
+    return { label: a.pair, val: last != null ? `${formatPrice(a.id, last)} ${a.quote}` : "…" };
   });
 
   return (
